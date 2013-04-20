@@ -7,7 +7,6 @@ import (
 )
 
 const epsilon = 0.0000125
-const lanczosWindow = 3.0
 
 func sinc(f float64) float64 {
 	f *= math.Pi
@@ -55,7 +54,7 @@ func triangle(x float64) float64 {
 		x = -x
 	}
 	if x > -1 {
-		return x
+		return 1+x
 	}
 	return 0
 }
@@ -82,35 +81,54 @@ var (
 		return x
 	}
 
+	// Count samples outside the boundaries as black.
 	Reject = func(x, min, max int) int {
 		// The code already rejects out of bounds return values.
 		// So we don't need to do anything
 		return x
 	}
+
+	Reflect = func(x, min, max int) int {
+		switch {
+		case x < min:
+			return 2*min - x
+		case x > max:
+			return 2*max - x
+		}
+		return x
+	}
 )
 
-func ResampleNRGBA64(dst, src *image.NRGBA64, f Filter, xWrap, yWrap WrapFunc) error {
-	// fmt.Printf("===> sampling filter in x ...\n")
+// Mid-level image scaling function.
+//
+// The source image src is sampled with the supplied
+// filter and boundary handling functions.
+func Resample(dst *image.NRGBA64, src image.Image, f Filter, xWrap, yWrap WrapFunc) error {
 	x_filter := makeDiscreteFilter(f, xWrap, dst.Bounds().Dx(), src.Bounds().Dx())
-
-	// fmt.Printf("===> sampling filter in y ...\n")
 	y_filter := makeDiscreteFilter(f, yWrap, dst.Bounds().Dy(), src.Bounds().Dy())
 
-	// fmt.Printf("===> folding Y ...\n")
 	tmp := image.NewNRGBA64(image.Rect(0, 0, src.Bounds().Dx(), dst.Bounds().Dy()))
 	resampleAxisNRGBA64(YAxis, tmp, src, y_filter)
-
-	// fmt.Printf("===> folding X ...\n")
 	resampleAxisNRGBA64(XAxis, dst, tmp, x_filter)
 	return nil
 }
 
-type fRGBA64 struct {
-	R, G, B, A float64
+type f32RGBA struct {
+	R, G, B, A float32
 }
 
 func clampF64ToUint16(x float64) uint16 {
 	if x > float64(uint16(0xffff)) {
+		return uint16(0xffff)
+	}
+	if x < 0 {
+		return 0
+	}
+	return uint16(x) // What happens with NaNs?
+}
+
+func clampF32ToUint16(x float32) uint16 {
+	if x > float32(uint16(0xffff)) {
 		return uint16(0xffff)
 	}
 	if x < 0 {
@@ -128,7 +146,7 @@ const (
 
 type kvPair struct {
 	k int
-	v float64
+	v float32
 }
 
 func makeDiscreteFilter(f Filter, wrap WrapFunc, ndst, nsrc int) [][]kvPair {
@@ -151,16 +169,19 @@ func makeDiscreteFilter(f Filter, wrap WrapFunc, ndst, nsrc int) [][]kvPair {
 			v := f.Apply(fscale*(float64(j)-src_x)) * fscale
 			k := wrap(j, 0, nsrc-1)
 			if 0 <= k && k < nsrc && v != 0 {
-				df[i] = append(df[i], kvPair{k, v})
+				df[i] = append(df[i], kvPair{k, float32(v)})
 			}
 		}
 	}
 	return df
 }
 
-const uint16tof64 = 1.0 / float64(uint16(0xffff))
+const (
+	uint16_to_f32 = 1.0 / float32(uint16(0xffff))
+	f32_to_uint16 = float32(uint16(0xffff))
+)
 
-func fillLineFRGBA64(flipXY bool, column []fRGBA64, x int, src *image.NRGBA64) {
+func fetchLineNRGBA64(flipXY bool, column []f32RGBA, x int, src *image.NRGBA64) {
 	dy := src.Bounds().Min.Y
 	dx := src.Bounds().Min.X
 	pix := src.Pix
@@ -171,15 +192,56 @@ func fillLineFRGBA64(flipXY bool, column []fRGBA64, x int, src *image.NRGBA64) {
 		} else {
 			idx = src.PixOffset(x+dx, y+dy)
 		}
-		column[y].R = uint16tof64 * float64(uint16(pix[idx+0])<<8|uint16(pix[idx+1]))
-		column[y].G = uint16tof64 * float64(uint16(pix[idx+2])<<8|uint16(pix[idx+3]))
-		column[y].B = uint16tof64 * float64(uint16(pix[idx+4])<<8|uint16(pix[idx+5]))
-		column[y].A = uint16tof64 * float64(uint16(pix[idx+6])<<8|uint16(pix[idx+7]))
+		column[y].R = uint16_to_f32 * float32(uint16(pix[idx+0])<<8|uint16(pix[idx+1]))
+		column[y].G = uint16_to_f32 * float32(uint16(pix[idx+2])<<8|uint16(pix[idx+3]))
+		column[y].B = uint16_to_f32 * float32(uint16(pix[idx+4])<<8|uint16(pix[idx+5]))
+		column[y].A = uint16_to_f32 * float32(uint16(pix[idx+6])<<8|uint16(pix[idx+7]))
+	}
+}
+
+func fetchLine(flipXY bool, column []f32RGBA, x int, src image.Image) {
+	switch src := src.(type) {
+	case *image.NRGBA64:
+		fetchLineNRGBA64(flipXY,column,x,src)
+		return
+
+	}
+	dy := src.Bounds().Min.Y
+	dx := src.Bounds().Min.X
+	var r,g,b,a uint32
+	for y := 0; y != len(column); y++ {
+		if flipXY {
+			r,g,b,a = src.At(y+dx,x+dy).RGBA()
+		} else {
+			r,g,b,a = src.At(x+dx,y+dy).RGBA()
+		}
+		column[y].R = uint16_to_f32 * float32(r)
+		column[y].G = uint16_to_f32 * float32(g)
+		column[y].B = uint16_to_f32 * float32(b)
+		column[y].A = uint16_to_f32 * float32(a)
+	}
+}
+
+func putLineNRGBA64(flipXY bool, column []f32RGBA, x int, dst *image.NRGBA64) {
+	dy := dst.Bounds().Min.Y
+	dx := dst.Bounds().Min.X
+	for y, dst_c := range column {
+		dst_nrgba := color.NRGBA64{
+				R: clampF32ToUint16(f32_to_uint16 * dst_c.R),
+				G: clampF32ToUint16(f32_to_uint16 * dst_c.G),
+				B: clampF32ToUint16(f32_to_uint16 * dst_c.B),
+				A: clampF32ToUint16(f32_to_uint16 * dst_c.A),
+		}
+		if flipXY {
+			dst.SetNRGBA64(y+dy, x+dx, dst_nrgba)
+		} else {
+			dst.SetNRGBA64(x+dx, y+dy, dst_nrgba)
+		}
 	}
 }
 
 // Resample axis..
-func resampleAxisNRGBA64(axis axisSwitch, dst, src *image.NRGBA64, f [][]kvPair) {
+func resampleAxisNRGBA64(axis axisSwitch, dst *image.NRGBA64, src image.Image, f [][]kvPair) {
 	flip := axis != YAxis
 
 	dst_bbox := dst.Bounds()
@@ -200,32 +262,24 @@ func resampleAxisNRGBA64(axis axisSwitch, dst, src *image.NRGBA64, f [][]kvPair)
 		panic("Axis must be preserved.")
 	}
 
-	src_column := make([]fRGBA64, ysize)
+	src_column := make([]f32RGBA, ysize)
+	dst_column := make([]f32RGBA, dst_max_y - dst_min_y)
 
 	for x := dst_min_x; x != dst_max_x; x++ {
-		fillLineFRGBA64(flip, src_column, x, src)
-		// Resample column
+		fetchLine(flip, src_column, x, src)
 		y_i := 0
 		for y := dst_min_y; y != dst_max_y; y++ {
-			var dst_c fRGBA64
+			var dst_c f32RGBA
 			for _, f_y := range f[y_i] {
-				dst_c.R += f_y.v * src_column[f_y.k].R
-				dst_c.G += f_y.v * src_column[f_y.k].G
-				dst_c.B += f_y.v * src_column[f_y.k].B
-				dst_c.A += f_y.v * src_column[f_y.k].A
+				src_c := src_column[f_y.k]
+				dst_c.R += f_y.v * src_c.R
+				dst_c.G += f_y.v * src_c.G
+				dst_c.B += f_y.v * src_c.B
+				dst_c.A += f_y.v * src_c.A
 			}
-			dst_nrgba := color.NRGBA64{
-				R: clampF64ToUint16((256*256 - 1) * dst_c.R),
-				G: clampF64ToUint16((256*256 - 1) * dst_c.G),
-				B: clampF64ToUint16((256*256 - 1) * dst_c.B),
-				A: clampF64ToUint16((256*256 - 1) * dst_c.A),
-			}
-			if flip {
-				dst.SetNRGBA64(y, x, dst_nrgba)
-			} else {
-				dst.SetNRGBA64(x, y, dst_nrgba)
-			}
+			dst_column[y_i] = dst_c
 			y_i++
 		}
+		putLineNRGBA64(flip, dst_column, x, dst)
 	}
 }

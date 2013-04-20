@@ -18,3 +18,5 @@ Status
 	<img src="https://raw.github.com/Zwobot/go-resample/master/gopher-logo-scaled.png"/>
 </span>
 </p>
+
+Gopher Logo by <a href="http://reneefrench.blogspot.com/">Renée French</a>
