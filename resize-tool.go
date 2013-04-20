@@ -3,14 +3,14 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/Zwobot/go-resample/resample"
 	"image"
-	"image/png"
 	_ "image/jpeg"
-	"resample"
+	"image/png"
 	"log"
 	"os"
-	"time"
 	"runtime/pprof"
+	"time"
 )
 
 func loadImage(filename string) image.Image {
@@ -37,21 +37,21 @@ func saveImage(pic image.Image, filename string) {
 	png.Encode(file, pic)
 }
 
-func sample(cpuprofile *string, src image.Image, dst *image.NRGBA64) {
+func sample(cpuprofile *string, src image.Image, dst image.Point) image.Image {
 	if *cpuprofile != "" {
-        f, err := os.Create(*cpuprofile)
-        if err != nil {
-            log.Fatal(err)
-        }
-        pprof.StartCPUProfile(f)
-        defer pprof.StopCPUProfile()
-    }
-    t0 := time.Now()
-    fmt.Printf("resampling ...")
-	resample.Resample(dst, src, resample.Lanczos12, resample.Reject, resample.Clamp)
-	fmt.Printf("\rresampling done: %s\n",time.Now().Sub(t0))
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+	t0 := time.Now()
+	fmt.Printf("resampling ...")
+	out, _ := resample.Resize(dst, src)
+	fmt.Printf("\rresampling done: %s\n", time.Now().Sub(t0))
+	return out
 }
-
 
 func main() {
 	var (
@@ -60,7 +60,7 @@ func main() {
 		W, H       int
 	)
 	var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
-	flag.StringVar(&InputFile, "image", "src/go-resample/gopher-logo.png", "image to resample")
+	flag.StringVar(&InputFile, "image", "src/github.com/Zwobot/go-resample/gopher-logo.png", "image to resample")
 	flag.IntVar(&W, "w", 1000, "new width")
 	flag.IntVar(&H, "h", 560, "new height")
 	flag.StringVar(&OutputFile, "o", "out.png", "output")
@@ -70,9 +70,7 @@ func main() {
 	src := loadImage(InputFile)
 	fmt.Printf("\rloaded %s %v\n", InputFile, src.Bounds().Max)
 
-	dst := image.NewNRGBA64(image.Rect(0, 0, W, H))
-
-	sample(cpuprofile,src, dst)
+	dst := sample(cpuprofile, src, image.Pt(W, H))
 	fmt.Printf("saving %s %v...", OutputFile, dst.Bounds().Max)
 	saveImage(dst, OutputFile)
 	fmt.Printf("\rsaved %s %v     \n", OutputFile, dst.Bounds().Max)

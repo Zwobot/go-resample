@@ -1,6 +1,37 @@
+// Resample provides generic image resampling (resizing) functions.
+//
+// Note that the package is in an <b>early stage of development</b>.
+// 
+// The simplest way to use this package is just to resize an image.
+// You'll just need to supply the source image and a new size.
+//
+// This will use the Lanczos3 scaling filter and handle the image
+// boundaries as if the last row/column would stretch beyond the
+// the boundaries of the source image.
+//
+// Example:
+//     // Double the size
+//     newSize := sourceImage.Bounds().Max.Mul(2)
+//     newImage, err := resample.Resize(newSize, sourceImage)
+//
+// An error can - theoretically - only occure when you supply
+// nonsensical input such as negative image sizes or a nil source
+// image.
+//
+// For more general usage - such as specifying the filter and
+// boundary handling see the Resampler struct and the Resample
+// function.
+//
+// Performance
+//
+// Very fast. :)
+//
+// The algorithm pre-calculates the used filter functions, so
+// don't hesitate to use Lanczos3 over cubic interpolation.
 package resample
 
 import (
+	"errors"
 	"image"
 	"image/color"
 	"math"
@@ -54,7 +85,7 @@ func triangle(x float64) float64 {
 		x = -x
 	}
 	if x > -1 {
-		return 1+x
+		return 1 + x
 	}
 	return 0
 }
@@ -99,13 +130,52 @@ var (
 	}
 )
 
-// Mid-level image scaling function.
-//
-// The source image src is sampled with the supplied
-// filter and boundary handling functions.
-func Resample(dst *image.NRGBA64, src image.Image, f Filter, xWrap, yWrap WrapFunc) error {
-	x_filter := makeDiscreteFilter(f, xWrap, dst.Bounds().Dx(), src.Bounds().Dx())
-	y_filter := makeDiscreteFilter(f, yWrap, dst.Bounds().Dy(), src.Bounds().Dy())
+var (
+	ErrMissingFilter        = errors.New("Filter F is nil in resampler struct.")
+	ErrMissingWrapFunc      = errors.New("Wrap func is nil in resampler struct.")
+	ErrSourceImageIsInvalid = errors.New("Source image is invalid.")
+	ErrTargetImageIsInvalid = errors.New("Target image is invalid.")
+	ErrTargetSizeIsInvalid  = errors.New("Target size is invalid.")
+)
+
+func Resize(p image.Point, src image.Image) (*image.NRGBA64, error) {
+	if src == nil {
+		return nil, ErrSourceImageIsInvalid
+	}
+	if p.X <= 0 || p.Y <= 0 {
+		return nil, ErrTargetSizeIsInvalid
+	}
+	rs := Resampler{
+		Lanczos3,
+		Clamp, Clamp,
+	}
+	dst := image.NewNRGBA64(image.Rect(0, 0, p.X, p.Y))
+	Resample(&rs, dst, src)
+	return dst, nil
+}
+
+type Resampler struct {
+	F     Filter
+	XWrap WrapFunc
+	YWrap WrapFunc
+}
+
+func Resample(rs *Resampler, dst *image.NRGBA64, src image.Image) error {
+	if rs.F.Apply == nil || rs.F.Support <= 0 {
+		return ErrMissingFilter
+	}
+	if rs.XWrap == nil || rs.YWrap == nil {
+		return ErrMissingWrapFunc
+	}
+	if src == nil {
+		return ErrSourceImageIsInvalid
+	}
+	if dst == nil {
+		return ErrTargetImageIsInvalid
+	}
+
+	x_filter := makeDiscreteFilter(rs.F, rs.XWrap, dst.Bounds().Dx(), src.Bounds().Dx())
+	y_filter := makeDiscreteFilter(rs.F, rs.YWrap, dst.Bounds().Dy(), src.Bounds().Dy())
 
 	tmp := image.NewNRGBA64(image.Rect(0, 0, src.Bounds().Dx(), dst.Bounds().Dy()))
 	resampleAxisNRGBA64(YAxis, tmp, src, y_filter)
@@ -115,16 +185,6 @@ func Resample(dst *image.NRGBA64, src image.Image, f Filter, xWrap, yWrap WrapFu
 
 type f32RGBA struct {
 	R, G, B, A float32
-}
-
-func clampF64ToUint16(x float64) uint16 {
-	if x > float64(uint16(0xffff)) {
-		return uint16(0xffff)
-	}
-	if x < 0 {
-		return 0
-	}
-	return uint16(x) // What happens with NaNs?
 }
 
 func clampF32ToUint16(x float32) uint16 {
@@ -159,7 +219,7 @@ func makeDiscreteFilter(f Filter, wrap WrapFunc, ndst, nsrc int) [][]kvPair {
 		support /= dst2src
 		fscale *= dst2src
 	}
-	nudge := 1e-8 
+	nudge := 1e-8
 	for i := 0; i != ndst; i++ {
 		src_x := float64(i) / dst2src
 		min := int(math.Floor(src_x - support - nudge))
@@ -202,18 +262,18 @@ func fetchLineNRGBA64(flipXY bool, column []f32RGBA, x int, src *image.NRGBA64) 
 func fetchLine(flipXY bool, column []f32RGBA, x int, src image.Image) {
 	switch src := src.(type) {
 	case *image.NRGBA64:
-		fetchLineNRGBA64(flipXY,column,x,src)
+		fetchLineNRGBA64(flipXY, column, x, src)
 		return
 
 	}
 	dy := src.Bounds().Min.Y
 	dx := src.Bounds().Min.X
-	var r,g,b,a uint32
+	var r, g, b, a uint32
 	for y := 0; y != len(column); y++ {
 		if flipXY {
-			r,g,b,a = src.At(y+dx,x+dy).RGBA()
+			r, g, b, a = src.At(y+dx, x+dy).RGBA()
 		} else {
-			r,g,b,a = src.At(x+dx,y+dy).RGBA()
+			r, g, b, a = src.At(x+dx, y+dy).RGBA()
 		}
 		column[y].R = uint16_to_f32 * float32(r)
 		column[y].G = uint16_to_f32 * float32(g)
@@ -227,10 +287,10 @@ func putLineNRGBA64(flipXY bool, column []f32RGBA, x int, dst *image.NRGBA64) {
 	dx := dst.Bounds().Min.X
 	for y, dst_c := range column {
 		dst_nrgba := color.NRGBA64{
-				R: clampF32ToUint16(f32_to_uint16 * dst_c.R),
-				G: clampF32ToUint16(f32_to_uint16 * dst_c.G),
-				B: clampF32ToUint16(f32_to_uint16 * dst_c.B),
-				A: clampF32ToUint16(f32_to_uint16 * dst_c.A),
+			R: clampF32ToUint16(f32_to_uint16 * dst_c.R),
+			G: clampF32ToUint16(f32_to_uint16 * dst_c.G),
+			B: clampF32ToUint16(f32_to_uint16 * dst_c.B),
+			A: clampF32ToUint16(f32_to_uint16 * dst_c.A),
 		}
 		if flipXY {
 			dst.SetNRGBA64(y+dy, x+dx, dst_nrgba)
@@ -263,7 +323,7 @@ func resampleAxisNRGBA64(axis axisSwitch, dst *image.NRGBA64, src image.Image, f
 	}
 
 	src_column := make([]f32RGBA, ysize)
-	dst_column := make([]f32RGBA, dst_max_y - dst_min_y)
+	dst_column := make([]f32RGBA, dst_max_y-dst_min_y)
 
 	for x := dst_min_x; x != dst_max_x; x++ {
 		fetchLine(flip, src_column, x, src)
