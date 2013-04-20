@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/draw"
 	"image/png"
+	_ "image/jpeg"
 	"resample"
 	"log"
 	"os"
