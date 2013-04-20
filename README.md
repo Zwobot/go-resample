@@ -8,13 +8,13 @@ Status
 ------
 
 <p align="center">
-<div style="border: 2px black; margin: 1em auto 1em auto">
-	<img src="http://raw.github.com/Zwobot/go-resample/master/gopher-logo.png"/>
-</div>
+<span style="border-color: black; border-size: 2px 2px 2px 2px">
+	<img src="https://raw.github.com/Zwobot/go-resample/master/gopher-logo.png"/>
+</span>
 </p>
 
 <p align="center">
-<div style="border: 2px black; margin: 1em auto 1em auto">
-	<img src="http://raw.github.com/Zwobot/go-resample/master/gopher-logo-scaled.png"/>
-</div>
+<span style="border-color: black; border-size: 2px 2px 2px 2px">
+	<img src="https://raw.github.com/Zwobot/go-resample/master/gopher-logo-scaled.png"/>
+</span>
 </p>
