@@ -19,8 +19,8 @@
 // image.
 //
 // For more general usage - such as specifying the filter and
-// boundary handling see the Resampler struct and the Resample
-// function.
+// boundary handling see the <tt>ResizeToChannel</tt> and
+// <tt>ResizeToChannelWithFilter</tt> functions.
 //
 // Performance
 //
@@ -31,6 +31,7 @@
 package resample
 
 import (
+	"log"
 	"errors"
 	"image"
 	"image/color"
@@ -138,49 +139,88 @@ var (
 	ErrTargetSizeIsInvalid  = errors.New("Target size is invalid.")
 )
 
-func Resize(p image.Point, src image.Image) (*image.NRGBA64, error) {
+func Resize(newSize image.Point, src image.Image) (*image.NRGBA64, error) {
 	if src == nil {
 		return nil, ErrSourceImageIsInvalid
 	}
-	if p.X <= 0 || p.Y <= 0 {
+	if newSize.X <= 0 || newSize.Y <= 0 {
 		return nil, ErrTargetSizeIsInvalid
 	}
-	rs := Resampler{
-		Lanczos3,
-		Clamp, Clamp,
+
+	channel, err := ResizeToChannel(newSize, src)
+	if err != nil {
+		return nil, err
 	}
-	dst := image.NewNRGBA64(image.Rect(0, 0, p.X, p.Y))
-	Resample(&rs, dst, src)
-	return dst, nil
+
+	for {
+		img := (<-channel)
+		if img.Image !=  nil {
+			return img.Image.(*image.NRGBA64), nil
+		}
+	}
+	panic("unreachable")
 }
 
-type Resampler struct {
-	F     Filter
-	XWrap WrapFunc
-	YWrap WrapFunc
+type Step struct {
+	Image image.Image
 }
 
-func Resample(rs *Resampler, dst *image.NRGBA64, src image.Image) error {
-	if rs.F.Apply == nil || rs.F.Support <= 0 {
-		return ErrMissingFilter
-	}
-	if rs.XWrap == nil || rs.YWrap == nil {
-		return ErrMissingWrapFunc
-	}
+func ResizeToChannel(newSize image.Point, src image.Image) (chan Step, error) {
+	c, err := ResizeToChannelWithFilter(newSize, src, Lanczos3, Clamp, Clamp)
+	return c, err
+}
+
+func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, XWrap, YWrap WrapFunc) (chan Step, error) {
 	if src == nil {
-		return ErrSourceImageIsInvalid
+		return nil, ErrSourceImageIsInvalid
 	}
-	if dst == nil {
-		return ErrTargetImageIsInvalid
+	if newSize.X <= 0 || newSize.Y <= 0 {
+		return nil, ErrTargetSizeIsInvalid
+	}
+	if F.Apply == nil || F.Support <= 0 {
+		return nil, ErrMissingFilter
+	}
+	if XWrap == nil || YWrap == nil {
+		return nil, ErrMissingWrapFunc
 	}
 
-	x_filter := makeDiscreteFilter(rs.F, rs.XWrap, dst.Bounds().Dx(), src.Bounds().Dx())
-	y_filter := makeDiscreteFilter(rs.F, rs.YWrap, dst.Bounds().Dy(), src.Bounds().Dy())
+	resultChannel := make(chan Step)
+	opCount := 0
+	lastOps := 0
+	opIncrement := 500 * 1000
+	keepAlive := func (ops int) bool {
+		defer func() { 
+			if r := recover(); r!= nil {
+				//log.Printf("Resize %s aborted!", newSize)
+			}
+		}()
+		opCount += ops
+		if opCount > lastOps {
+			//log.Printf("Resize %s @ %d kOps", newSize, opCount/1000)
+			resultChannel <- Step{Image:nil}
+			lastOps += opIncrement
+		}
+		return true
 
-	tmp := image.NewNRGBA64(image.Rect(0, 0, src.Bounds().Dx(), dst.Bounds().Dy()))
-	resampleAxisNRGBA64(YAxis, tmp, src, y_filter)
-	resampleAxisNRGBA64(XAxis, dst, tmp, x_filter)
-	return nil
+	}
+	sendImage := func(img image.Image) {
+		defer func() { recover() }()
+		resultChannel <- Step{Image:img}
+	}
+
+	go func() {
+		log.Printf("Resize %s started!", newSize)
+		xFilter := makeDiscreteFilter(F, XWrap, newSize.X, src.Bounds().Dx())
+		yFilter := makeDiscreteFilter(F, YWrap, newSize.Y, src.Bounds().Dy())
+
+		dst := image.NewNRGBA64(image.Rect(0, 0, newSize.X, newSize.Y))
+		tmp := image.NewNRGBA64(image.Rect(0, 0, src.Bounds().Dx(), dst.Bounds().Dy()))
+		resampleAxisNRGBA64(YAxis, keepAlive, tmp, src, yFilter)
+		resampleAxisNRGBA64(XAxis, keepAlive, dst, tmp, xFilter)
+		log.Printf("Resize %v -> %v %d kOps",src.Bounds().Max, newSize, opCount/1000)
+		sendImage(dst)
+	}()
+	return resultChannel, nil
 }
 
 type f32RGBA struct {
@@ -301,7 +341,7 @@ func putLineNRGBA64(flipXY bool, column []f32RGBA, x int, dst *image.NRGBA64) {
 }
 
 // Resample axis..
-func resampleAxisNRGBA64(axis axisSwitch, dst *image.NRGBA64, src image.Image, f [][]kvPair) {
+func resampleAxisNRGBA64(axis axisSwitch, keepAlive func (int) bool, dst *image.NRGBA64, src image.Image, f [][]kvPair) {
 	flip := axis != YAxis
 
 	dst_bbox := dst.Bounds()
@@ -326,6 +366,7 @@ func resampleAxisNRGBA64(axis axisSwitch, dst *image.NRGBA64, src image.Image, f
 	dst_column := make([]f32RGBA, dst_max_y-dst_min_y)
 
 	for x := dst_min_x; x != dst_max_x; x++ {
+		opCount := 0
 		fetchLine(flip, src_column, x, src)
 		y_i := 0
 		for y := dst_min_y; y != dst_max_y; y++ {
@@ -338,8 +379,12 @@ func resampleAxisNRGBA64(axis axisSwitch, dst *image.NRGBA64, src image.Image, f
 				dst_c.A += f_y.v * src_c.A
 			}
 			dst_column[y_i] = dst_c
+			opCount += len(f[y_i])
 			y_i++
 		}
 		putLineNRGBA64(flip, dst_column, x, dst)
+		if !keepAlive(opCount) {
+			return
+		}
 	}
 }
