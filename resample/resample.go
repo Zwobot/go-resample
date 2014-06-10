@@ -227,9 +227,18 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 		yFilter := makeDiscreteFilter(F, YWrap, newSize.Y, src.Bounds().Dy())
 
 		dst := image.NewNRGBA64(image.Rect(0, 0, newSize.X, newSize.Y))
-		tmp := image.NewNRGBA64(image.Rect(0, 0, src.Bounds().Dx(), dst.Bounds().Dy()))
-		resampleAxisNRGBA64(YAxis, keepAlive, tmp, src, yFilter)
-		resampleAxisNRGBA64(XAxis, keepAlive, dst, tmp, xFilter)
+        
+        xy_ops := src.Bounds().Dx() * dst.Bounds().Dy()
+        yx_ops := src.Bounds().Dy() * dst.Bounds().Dx()
+        if xy_ops < yx_ops {
+            tmp := image.NewNRGBA64(image.Rect(0, 0, src.Bounds().Dx(), dst.Bounds().Dy()))
+            resampleAxisNRGBA64(YAxis, keepAlive, tmp, src, yFilter)
+            resampleAxisNRGBA64(XAxis, keepAlive, dst, tmp, xFilter)
+        } else {
+            tmp := image.NewNRGBA64(image.Rect(0, 0, dst.Bounds().Dx(), src.Bounds().Dy()))
+            resampleAxisNRGBA64(XAxis, keepAlive, tmp, src, xFilter)
+            resampleAxisNRGBA64(YAxis, keepAlive, dst, tmp, yFilter)
+        }
 		//log.Printf("Resize %v -> %v %d kOps",src.Bounds().Max, newSize, opCount/1000)
 		sendImage(dst)
 	}()
