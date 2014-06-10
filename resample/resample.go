@@ -40,9 +40,9 @@
 package resample
 
 import (
-	//"log"
 	"image"
 	"image/color"
+	"log"
 	"math"
 )
 
@@ -115,38 +115,36 @@ var (
 
 type WrapFunc func(x, min, max int) int
 
-var (
-	// Clamp the filter at the image boundaries.
-	// This results in sampling the boundary pixel
-	// repeatedly, which is what is usually desired.
-	Clamp = func(x, min, max int) int {
-		switch {
-		case x < min:
-			x = min
-		case x > max:
-			x = max
-		}
-		return x
+// Clamp the filter at the image boundaries.
+// This results in sampling the boundary pixel
+// repeatedly, which is what is usually desired.
+func Clamp(x, min, max int) int {
+	switch {
+	case x < min:
+		x = min
+	case x > max:
+		x = max
 	}
+	return x
+}
 
-	// Count samples outside the boundaries as black.
-	Reject = func(x, min, max int) int {
-		// The code already rejects out of bounds return values.
-		return x
-	}
+// Count samples outside the boundaries as black.
+func Reject(x, min, max int) int {
+	// The code already rejects out of bounds return values.
+	return x
+}
 
-	// This will cause the filter to see the picture
-	// at the boundaries as if it where mirrored.
-	Reflect = func(x, min, max int) int {
-		switch {
-		case x < min:
-			return 2*min - x
-		case x > max:
-			return 2*max - x
-		}
-		return x
+// This will cause the filter to see the picture
+// at the boundaries as if it where mirrored.
+func Reflect(x, min, max int) int {
+	switch {
+	case x < min:
+		return 2*min - x
+	case x > max:
+		return 2*max - x
 	}
-)
+	return x
+}
 
 type Error int
 
@@ -205,14 +203,14 @@ func Resize(newSize image.Point, src image.Image) (*image.NRGBA64, error) {
 
 // A step of the resampling process. 
 type Step interface {
-    // Returns true on the last step.
-    Done() bool
-    
-    // The resampled image. Only guaranteed non-nil when done.
-    Image() image.Image
-    
-    // Percentage done.
-    Percent() int
+	// Returns true on the last step.
+	Done() bool
+
+	// The resampled image. Only guaranteed non-nil when done.
+	Image() image.Image
+
+	// Percentage done.
+	Percent() int
 }
 
 type step struct {
@@ -226,7 +224,7 @@ type step struct {
 }
 
 func (s step) Done() bool {
-    return s.image != nil
+	return s.image != nil
 }
 
 func (s step) Image() image.Image {
@@ -239,7 +237,7 @@ func (s step) Percent() int {
 
 // Returns a blocking receive only channel of Step.
 //
-// Once Step.Image() is non-nil, the calculation has finished and the channel is closed.
+// Once Step.Done() is true, the calculation has finished and the channel is closed.
 // You can use this to abort calculating larger image resamples or to show percentage
 // done indicators.
 func ResizeToChannel(newSize image.Point, src image.Image) (<-chan Step, error) {
@@ -249,7 +247,7 @@ func ResizeToChannel(newSize image.Point, src image.Image) (<-chan Step, error) 
 
 // Returns a blocking receive only channel of Step.
 //
-// Once Step.Image() is non-nil, the calculation has finished and the channel is closed.
+// Once Step.Done() is true, the calculation has finished and the channel is closed.
 // You can use this to abort calculating larger image resamples or to show percentage
 // done indicators.
 //
@@ -366,6 +364,8 @@ func makeDiscreteFilter(f Filter, wrap WrapFunc, ndst, nsrc int) ([][]kvPair, in
 	}
 	nudge := 1e-8
 	for i := 0; i != ndst; i++ {
+		var sum_v float32
+
 		src_x := float64(i) / dst2src
 		min := int(math.Floor(src_x - support - nudge))
 		max := int(math.Ceil(src_x + support + nudge))
@@ -376,8 +376,16 @@ func makeDiscreteFilter(f Filter, wrap WrapFunc, ndst, nsrc int) ([][]kvPair, in
 			if 0 <= k && k < nsrc && v != 0 {
 				df[i] = append(df[i], kvPair{k, float32(v)})
 				count++
+				sum_v += float32(v)
 			}
 		}
+		// Rescaling so far hasn't been important for upscaling
+		// but it IS correct anyhow, so we keep the extra work.
+		rescale := float32(1.0) / sum_v
+		for j, kv := range df[i] {
+			df[i][j].v = rescale * kv.v
+		}
+		//log.Println(min, max, max-min, support,  sum_v, df[i])
 	}
 	return df, count
 }
@@ -470,7 +478,7 @@ func resampleAxisNRGBA64(axis axisSwitch, keepAlive func(int) bool, dst *image.N
 	// and thus we keep the ugly panic to make sure we do
 	// use this function correctly.
 	if dst_max_x-dst_min_x != xsize {
-		panic("Unfiltered axis must have preserved size.")
+		log.Fatalf("Unfiltered axis must have preserved size.")
 	}
 
 	src_column := make([]f32RGBA, ysize)
