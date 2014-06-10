@@ -48,15 +48,23 @@ func sample(cpuprofile *string, src image.Image, dst image.Point) (image.Image, 
 	}
 	t0 := time.Now()
 	fmt.Printf("resampling ...")
-	out, err := resample.Resize(dst, src)
-    if err ==  nil {
-        fmt.Printf("\rresampling done: %s\n", time.Now().Sub(t0))
-        return out, nil
-    } else {
-        fmt.Printf("\rresampling failed: %s (%s)\n", time.Now().Sub(t0), err)
-        return nil, err
-    }
-    return nil, nil
+	out, err := resample.ResizeToChannel(dst, src)
+
+	if err != nil {
+		fmt.Printf("\rresampling failed: %s\n", err)
+		return nil, err
+	}
+
+	for {
+		step := <-out
+		if !step.Done() {
+			fmt.Printf("\rresampling done: %s\n", time.Now().Sub(t0))
+			return step.Image(), nil
+		} else {
+			fmt.Printf("\rresampling... %d%%", step.Percent())
+		}
+	}
+	return nil, nil
 }
 
 func main() {
@@ -77,9 +85,9 @@ func main() {
 	fmt.Printf("\rloaded %s %v\n", InputFile, src.Bounds().Max)
 
 	dst, err := sample(cpuprofile, src, image.Pt(W, H))
-    if err == nil {
-        fmt.Printf("saving %s %v...", OutputFile, dst.Bounds().Max)
-        saveImage(dst, OutputFile)
-        fmt.Printf("\rsaved %s %v     \n", OutputFile, dst.Bounds().Max)
-    }
+	if err == nil {
+		fmt.Printf("saving %s %v...", OutputFile, dst.Bounds().Max)
+		saveImage(dst, OutputFile)
+		fmt.Printf("\rsaved %s %v     \n", OutputFile, dst.Bounds().Max)
+	}
 }

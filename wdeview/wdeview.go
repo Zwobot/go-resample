@@ -15,6 +15,7 @@ import (
 	"log"
 	"os"
 	"path"
+
 // 	"time"
 )
 
@@ -23,31 +24,29 @@ func ResizeLoop(win wde.Window, filename string, baseImage image.Image) chan ima
 
 	go func() {
 		baseSize := baseImage.Bounds().Max
-		var resizeChan chan resample.Step
+		var resizeChan <-chan resample.Step
 		var newSize image.Point
-        for {
-            select {
-            case newSize = <-req:
-                win.SetTitle(fmt.Sprintf("%s %v %v", path.Base(filename), baseSize, newSize))
-                log.Printf("%s %v %v", path.Base(filename), baseSize, newSize)
-                if resizeChan != nil {
-                    close(resizeChan)
-                }
-                resizeChan, _ = resample.ResizeToChannel(newSize, baseImage)
-                
-            case step := <-resizeChan:
-                if step.Image != nil {
-                    log.Printf("%s %v %v DONE", path.Base(filename), baseSize, newSize)
-                    screen := win.Screen()
-                    draw.Draw(screen, screen.Bounds(), step.Image, image.ZP, draw.Src)
-                    win.FlushImage()
-                } else {
-                    ratio := float32(step.Done)/float32(step.Total)
-                    log.Printf("%s %v %v STEP (%d%%)", path.Base(filename),
-                               baseSize, newSize, int(100*ratio))
-                }
-            }
-        }
+		for {
+			select {
+			case newSize = <-req:
+				win.SetTitle(fmt.Sprintf("%s %v %v", path.Base(filename), baseSize, newSize))
+				log.Printf("%s %v %v", path.Base(filename), baseSize, newSize)
+				resizeChan, _ = resample.ResizeToChannel(newSize, baseImage)
+
+			case step := <-resizeChan:
+				if step.Done() {
+					log.Printf("%s %v %v DONE (%d%%)", path.Base(filename),
+						baseSize, newSize, step.Percent())
+					screen := win.Screen()
+					draw.Draw(screen, screen.Bounds(), step.Image(), image.ZP, draw.Src)
+					win.FlushImage()
+					resizeChan = nil
+				} else {
+					log.Printf("%s %v %v STEP (%d%%)", path.Base(filename),
+						baseSize, newSize, step.Percent())
+				}
+			}
+		}
 	}()
 	return req
 }
