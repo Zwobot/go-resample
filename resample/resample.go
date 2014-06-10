@@ -31,7 +31,7 @@
 package resample
 
 import (
-	"log"
+	//"log"
 	"errors"
 	"image"
 	"image/color"
@@ -132,8 +132,8 @@ var (
 )
 
 var (
-	ErrMissingFilter        = errors.New("Filter F is nil in resampler struct.")
-	ErrMissingWrapFunc      = errors.New("Wrap func is nil in resampler struct.")
+	ErrMissingFilter        = errors.New("Filter is invalid.")
+	ErrMissingWrapFunc      = errors.New("Wrap function is invalid.")
 	ErrSourceImageIsInvalid = errors.New("Source image is invalid.")
 	ErrTargetImageIsInvalid = errors.New("Target image is invalid.")
 	ErrTargetSizeIsInvalid  = errors.New("Target size is invalid.")
@@ -143,9 +143,12 @@ func Resize(newSize image.Point, src image.Image) (*image.NRGBA64, error) {
 	if src == nil {
 		return nil, ErrSourceImageIsInvalid
 	}
-	if newSize.X <= 0 || newSize.Y <= 0 {
+	if newSize.X < 0 || newSize.Y < 0 {
 		return nil, ErrTargetSizeIsInvalid
 	}
+    if newSize.X == 0 || newSize.Y == 0 {
+        return image.NewNRGBA64(image.Rect(0, 0, newSize.X, newSize.Y)), nil
+    }
 
 	channel, err := ResizeToChannel(newSize, src)
 	if err != nil {
@@ -174,9 +177,9 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 	if src == nil {
 		return nil, ErrSourceImageIsInvalid
 	}
-	if newSize.X <= 0 || newSize.Y <= 0 {
-		return nil, ErrTargetSizeIsInvalid
-	}
+    if newSize.X < 0 || newSize.Y < 0 {
+        return nil, ErrTargetSizeIsInvalid
+    }
 	if F.Apply == nil || F.Support <= 0 {
 		return nil, ErrMissingFilter
 	}
@@ -185,6 +188,10 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 	}
 
 	resultChannel := make(chan Step)
+	// Code for the KeepAlive function used to
+	// break the calulculation into blocks.
+	// For now the op count is more or less
+	// placeholder code.
 	opCount := 0
 	lastOps := 0
 	opIncrement := 500 * 1000
@@ -207,9 +214,15 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 		defer func() { recover() }()
 		resultChannel <- Step{Image:img}
 	}
+	
+    if newSize.X == 0 || newSize.Y == 0 {
+        go sendImage(image.NewNRGBA64(image.Rect(0, 0, newSize.X, newSize.Y)));
+        return resultChannel, nil
+    }
+
 
 	go func() {
-		log.Printf("Resize %s started!", newSize)
+		//log.Printf("Resize %s started!", newSize)
 		xFilter := makeDiscreteFilter(F, XWrap, newSize.X, src.Bounds().Dx())
 		yFilter := makeDiscreteFilter(F, YWrap, newSize.Y, src.Bounds().Dy())
 
@@ -217,7 +230,7 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 		tmp := image.NewNRGBA64(image.Rect(0, 0, src.Bounds().Dx(), dst.Bounds().Dy()))
 		resampleAxisNRGBA64(YAxis, keepAlive, tmp, src, yFilter)
 		resampleAxisNRGBA64(XAxis, keepAlive, dst, tmp, xFilter)
-		log.Printf("Resize %v -> %v %d kOps",src.Bounds().Max, newSize, opCount/1000)
+		//log.Printf("Resize %v -> %v %d kOps",src.Bounds().Max, newSize, opCount/1000)
 		sendImage(dst)
 	}()
 	return resultChannel, nil

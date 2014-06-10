@@ -15,49 +15,37 @@ import (
 	"log"
 	"os"
 	"path"
-	"time"
+// 	"time"
 )
 
 func ResizeLoop(win wde.Window, filename string, baseImage image.Image) chan image.Point {
 	req := make(chan image.Point, 10)
 
-	skipRequests := func(pt image.Point, delay time.Duration) image.Point {
-		for {
-			select {
-			case pt = <-req:
-			case <-time.After(delay):
-				return pt
-			}
-		}
-		return pt
-	}
-
 	go func() {
 		baseSize := baseImage.Bounds().Max
-		for newSize := range req {
-			newSize = skipRequests(newSize, 10*time.Microsecond)
-
-			win.SetSize(newSize.X, newSize.Y)
-			win.SetTitle(fmt.Sprintf("%s %v %v", path.Base(filename), baseSize, newSize))
-
-			resizeJob, _ := resample.ResizeToChannel(newSize, baseImage)
-			var resizeStep resample.Step
-			for resizeStep.Image == nil {
-				resizeStep = <-resizeJob
-				nextNewSize := skipRequests(newSize, 10*time.Microsecond)
-				if nextNewSize != newSize {
-					close(resizeJob)
-					newSize = nextNewSize
-					resizeJob, _ = resample.ResizeToChannel(newSize, baseImage)
-
-					win.SetSize(newSize.X, newSize.Y)
-					win.SetTitle(fmt.Sprintf("%s %v %v", path.Base(filename), baseSize, newSize))
-				}
-			}
-			screen := win.Screen()
-			draw.Draw(screen, screen.Bounds(), resizeStep.Image, image.ZP, draw.Src)
-			win.FlushImage()
-		}
+		var resizeChan chan resample.Step
+		var newSize image.Point
+        for {
+            select {
+            case newSize = <-req:
+                win.SetTitle(fmt.Sprintf("%s %v %v", path.Base(filename), baseSize, newSize))
+                log.Printf("%s %v %v", path.Base(filename), baseSize, newSize)
+                if resizeChan != nil {
+                    close(resizeChan)
+                }
+                resizeChan, _ = resample.ResizeToChannel(newSize, baseImage)
+                
+            case step := <-resizeChan:
+                if step.Image != nil {
+                    log.Printf("%s %v %v DONE", path.Base(filename), baseSize, newSize)
+                    screen := win.Screen()
+                    draw.Draw(screen, screen.Bounds(), step.Image, image.ZP, draw.Src)
+                    win.FlushImage()
+                } else {
+                    log.Printf("%s %v %v STEP", path.Base(filename), baseSize, newSize)
+                }
+            }
+        }
 	}()
 	return req
 }

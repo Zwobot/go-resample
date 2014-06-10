@@ -37,7 +37,7 @@ func saveImage(pic image.Image, filename string) {
 	png.Encode(file, pic)
 }
 
-func sample(cpuprofile *string, src image.Image, dst image.Point) image.Image {
+func sample(cpuprofile *string, src image.Image, dst image.Point) (image.Image, error) {
 	if *cpuprofile != "" {
 		f, err := os.Create(*cpuprofile)
 		if err != nil {
@@ -48,9 +48,15 @@ func sample(cpuprofile *string, src image.Image, dst image.Point) image.Image {
 	}
 	t0 := time.Now()
 	fmt.Printf("resampling ...")
-	out, _ := resample.Resize(dst, src)
-	fmt.Printf("\rresampling done: %s\n", time.Now().Sub(t0))
-	return out
+	out, err := resample.Resize(dst, src)
+    if err ==  nil {
+        fmt.Printf("\rresampling done: %s\n", time.Now().Sub(t0))
+        return out, nil
+    } else {
+        fmt.Printf("\rresampling failed: %s (%s)\n", time.Now().Sub(t0), err)
+        return nil, err
+    }
+    return nil, nil
 }
 
 func main() {
@@ -70,8 +76,10 @@ func main() {
 	src := loadImage(InputFile)
 	fmt.Printf("\rloaded %s %v\n", InputFile, src.Bounds().Max)
 
-	dst := sample(cpuprofile, src, image.Pt(W, H))
-	fmt.Printf("saving %s %v...", OutputFile, dst.Bounds().Max)
-	saveImage(dst, OutputFile)
-	fmt.Printf("\rsaved %s %v     \n", OutputFile, dst.Bounds().Max)
+	dst, err := sample(cpuprofile, src, image.Pt(W, H))
+    if err == nil {
+        fmt.Printf("saving %s %v...", OutputFile, dst.Bounds().Max)
+        saveImage(dst, OutputFile)
+        fmt.Printf("\rsaved %s %v     \n", OutputFile, dst.Bounds().Max)
+    }
 }
