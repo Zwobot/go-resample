@@ -133,7 +133,7 @@ var (
 	// Used by FreeImage, Image as bicubic
 	Mitchell = Filter{Apply: cubic(1.0/1.3, 1.0/1.3), Support: 2}
 	// Used by GIMP as bicubic
-	CatmullRom = Filter{Apply: cubic(0, 1.0/1.2), Support: 2}
+	CatmullRom = Filter{Apply: cubic(0, 1.0/2.0), Support: 2}
 	// Used by ImageMagick, Paint.Net as (bi-)cubic
 	BSpline = Filter{Apply: cubic(1.0, 0.0), Support: 2}
 )
@@ -259,6 +259,12 @@ func (s step) Image() image.Image {
 }
 
 func (s step) Percent() int {
+    if s.Done() {
+        return 100
+    }
+    if s.total == 0 {
+        return 0
+    }
 	return int(100 * float32(s.done) / float32(s.total))
 }
 
@@ -301,10 +307,10 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 	// Sends on the channel only happen every opIncrement
 	// operations. For now this is hardcoded to a reasonable value.
 	var opCount, totalOps, lastOps, opIncrement int
-	opIncrement = 500 * 1000
+	opIncrement = 200 * 1000
 	keepAlive := func(ops int) bool {
 		opCount += ops
-		if opCount > lastOps {
+		if opCount >= lastOps {
 			//ratio := float64(opCount/256)/float64(totalOps/256)
 			//log.Printf("Resize %s @ %v kOps (%v%%)", newSize, opCount/1000, int(100*ratio))
 			resultChannel <- step{image: nil, total: totalOps, done: opCount}
@@ -324,7 +330,9 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 	}
 
 	go func() {
-		//log.Printf("Resize %s started!", newSize)
+        // Send first empty step before we do any real work.
+        keepAlive(0)
+        
 		xFilter, xOps := makeDiscreteFilter(F, XWrap, newSize.X, src.Bounds().Dx())
 		yFilter, yOps := makeDiscreteFilter(F, YWrap, newSize.Y, src.Bounds().Dy())
 

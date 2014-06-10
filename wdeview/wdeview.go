@@ -9,6 +9,7 @@ import (
 	"github.com/skelterjohn/go.wde"
 	_ "github.com/skelterjohn/go.wde/init"
 	"image"
+	"image/color"
 	"image/draw"
 	_ "image/jpeg"
 	_ "image/png"
@@ -19,40 +20,83 @@ import (
 // 	"time"
 )
 
-func ResizeLoop(win wde.Window, filename string, baseImage image.Image) chan image.Point {
-	req := make(chan image.Point, 10)
+type namedFilter struct {
+	Name string
+	F    resample.Filter
+}
 
-	go func() {
-		baseSize := baseImage.Bounds().Max
-		var resizeChan <-chan resample.Step
-		var newSize image.Point
-		for {
-			select {
-			case newSize = <-req:
-				win.SetTitle(fmt.Sprintf("%s %v %v", path.Base(filename), baseSize, newSize))
-				log.Printf("%s %v %v", path.Base(filename), baseSize, newSize)
-				resizeChan, _ = resample.ResizeToChannelWithFilter(
-					newSize, baseImage,
-					resample.BSpline,
-					resample.Reject,
-					resample.Reject)
+var filters = [...]namedFilter{
+	{"Box", resample.Box},
+	{"Triangle", resample.Triangle},
+	{"Lanczos3", resample.Lanczos3},
+	{"Lanczos5", resample.Lanczos5},
+	{"Lanczos12", resample.Lanczos12},
+	{"Mitchell", resample.Mitchell},
+	{"CatmullRom", resample.CatmullRom},
+	{"BSpline", resample.BSpline}}
 
-			case step := <-resizeChan:
-				if step.Done() {
-					log.Printf("%s %v %v DONE (%d%%)", path.Base(filename),
-						baseSize, newSize, step.Percent())
-					screen := win.Screen()
-					draw.Draw(screen, screen.Bounds(), step.Image(), image.ZP, draw.Src)
-					win.FlushImage()
-					resizeChan = nil
-				} else {
-					log.Printf("%s %v %v STEP (%d%%)", path.Base(filename),
-						baseSize, newSize, step.Percent())
-				}
+func drawProgress(win wde.Window, percent int) {
+	black := color.RGBA{0, 0, 0, 255}
+	white := color.RGBA{255, 255, 255, 255}
+	screen := win.Screen()
+
+	r := screen.Bounds()
+	r = image.Rect(0, 0,
+		r.Dx(), 20)
+
+	draw.Draw(screen, r, &image.Uniform{black}, image.ZP, draw.Src)
+	r2 := r
+	r2.Min = r2.Min.Add(image.Pt(2, 2))
+	r2.Max = r2.Max.Sub(image.Pt(2, 2))
+	r2.Max.X = r2.Min.X + (r2.Dx()*percent)/100
+	draw.Draw(screen, r2, &image.Uniform{white}, image.ZP, draw.Src)
+
+	win.FlushImage(r)
+}
+
+func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
+	win wde.Window, filename string, baseImage image.Image) {
+	baseSize := baseImage.Bounds().Max
+	var resizeChan <-chan resample.Step
+	var newSize image.Point
+	newFilter := namedFilter{"Box", resample.Box}
+	for {
+		select {
+		case newFilter = <-fchan:
+			win.SetTitle(fmt.Sprintf("%s %s %v %v", newFilter.Name, path.Base(filename), baseSize, newSize))
+			log.Printf("%s %s %v %v", path.Base(filename), newFilter.Name, baseSize, newSize)
+			resizeChan, _ = resample.ResizeToChannelWithFilter(
+				newSize, baseImage,
+				newFilter.F,
+				resample.Reject,
+				resample.Reject)
+
+		case newSize = <-req:
+			win.SetTitle(fmt.Sprintf("%s %s %v %v", newFilter.Name, path.Base(filename), baseSize, newSize))
+			log.Printf("%s %s %v %v", path.Base(filename), newFilter.Name, baseSize, newSize)
+			resizeChan, _ = resample.ResizeToChannelWithFilter(
+				newSize, baseImage,
+				newFilter.F,
+				resample.Reject,
+				resample.Reject)
+
+		case step := <-resizeChan:
+			if step.Done() {
+				drawProgress(win, step.Percent())
+				log.Printf("%s %v %v DONE (%d%%)", path.Base(filename),
+					baseSize, newSize, step.Percent())
+				screen := win.Screen()
+				draw.Draw(screen, screen.Bounds(), step.Image(), image.ZP, draw.Src)
+				win.FlushImage()
+				resizeChan = nil
+			} else {
+				drawProgress(win, step.Percent())
+				log.Printf("%s %v %v STEP (%d%%)", path.Base(filename),
+					baseSize, newSize, step.Percent())
 			}
 		}
-	}()
-	return req
+	}
+
 }
 
 func wdeMain() {
@@ -85,9 +129,15 @@ func wdeMain() {
 		log.Fatalf("%s", err.Error())
 	}
 
-	resizeChan := ResizeLoop(win, *filename, baseImage)
-
+	resizeChan := make(chan image.Point, 10)
 	resizeChan <- image.Point{baseW, baseH}
+
+	filterChan := make(chan namedFilter, 10)
+	currentFilter := 0
+	filterChan <- filters[currentFilter]
+
+	go ResizeLoop(resizeChan, filterChan, win, *filename, baseImage)
+
 	win.Show()
 
 	events := win.EventChan()
@@ -99,6 +149,9 @@ func wdeMain() {
 		case wde.ResizeEvent:
 			resizeChan <- image.Point{e.Width, e.Height}
 
+		case wde.KeyUpEvent:
+			currentFilter = (currentFilter + 1) % len(filters)
+			filterChan <- filters[currentFilter]
 		}
 	}
 
