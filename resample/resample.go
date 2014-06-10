@@ -42,7 +42,6 @@ package resample
 import (
 	"image"
 	"image/color"
-	"log"
 	"math"
 )
 
@@ -73,6 +72,24 @@ func lanczos(w float64) func(f float64) float64 {
 		}
 		if f < w {
 			return cutnoise(sinc(f) * sinc(f/w))
+		}
+		return 0.0
+	}
+}
+
+func cubic(b, c float64) func(float64) float64 {
+	return func(t float64) float64 {
+		tt := t * t
+		if t < 0 {
+			t = -t
+		}
+		if t < 1.0 {
+			t = (((12.0 - 9.0*b - 6.0*c) * (t * tt)) + ((-18.0 + 12.0*b + 6.0*c) * tt) + (6.0 - 2*b))
+			return t / 6.0
+		}
+		if t < 2.0 {
+			t = (((-1.0*b - 6.0*c) * (t * tt)) + ((6.0*b + 30.0*c) * tt) + ((-12.0*b - 48.0*c) * t) + (8.0*b + 24*c))
+			return t / 6.0
 		}
 		return 0.0
 	}
@@ -109,15 +126,23 @@ var (
 	Lanczos12 = Filter{Apply: lanczos(12), Support: 12}
 	Lanczos5  = Filter{Apply: lanczos(5), Support: 5}
 	Lanczos3  = Filter{Apply: lanczos(3), Support: 3}
-	Box       = Filter{Apply: box, Support: 0.5}
-	Triangle  = Filter{Apply: triangle, Support: 1}
+	// Also called linear
+	Box = Filter{Apply: box, Support: 0.5}
+	// Also called bilinear
+	Triangle = Filter{Apply: triangle, Support: 1}
+	// Used by FreeImage, Image as bicubic
+	Mitchell = Filter{Apply: cubic(1.0/1.3, 1.0/1.3), Support: 2}
+	// Used by GIMP as bicubic
+	CatmullRom = Filter{Apply: cubic(0, 1.0/1.2), Support: 2}
+	// Used by ImageMagick, Paint.Net as (bi-)cubic
+	BSpline = Filter{Apply: cubic(1.0, 0.0), Support: 2}
 )
 
 type WrapFunc func(x, min, max int) int
 
 // Clamp the filter at the image boundaries.
-// This results in sampling the boundary pixel
-// repeatedly, which is what is usually desired.
+//
+// This results in sampling the boundary pixel repeatedly.
 func Clamp(x, min, max int) int {
 	switch {
 	case x < min:
@@ -128,9 +153,11 @@ func Clamp(x, min, max int) int {
 	return x
 }
 
-// Count samples outside the boundaries as black.
+// Reject samples from outside the image
 func Reject(x, min, max int) int {
-	// The code already rejects out of bounds return values.
+	if x < min || x > max {
+		return -1
+	}
 	return x
 }
 
@@ -173,7 +200,7 @@ func (e Error) Error() string {
 }
 
 // Create a new image.NRGBA64 with the size newSize and resampled
-// from src via the Lanczos3 filter. Boundaries are clamped.
+// from src via the Lanczos3 filter. Boundaries are rejected.
 // Returns an error if the src is nil, or if the newSize is
 // negative in either dimension.
 func Resize(newSize image.Point, src image.Image) (*image.NRGBA64, error) {
@@ -198,7 +225,7 @@ func Resize(newSize image.Point, src image.Image) (*image.NRGBA64, error) {
 			return img.Image().(*image.NRGBA64), nil
 		}
 	}
-	panic("unreachable")
+	panic("Unreachable code reached. This is a BUG in go-resample.")
 }
 
 // A step of the resampling process. 
@@ -241,7 +268,7 @@ func (s step) Percent() int {
 // You can use this to abort calculating larger image resamples or to show percentage
 // done indicators.
 func ResizeToChannel(newSize image.Point, src image.Image) (<-chan Step, error) {
-	c, err := ResizeToChannelWithFilter(newSize, src, Lanczos3, Clamp, Clamp)
+	c, err := ResizeToChannelWithFilter(newSize, src, Lanczos3, Reject, Reject)
 	return c, err
 }
 
@@ -354,7 +381,15 @@ type kvPair struct {
 func makeDiscreteFilter(f Filter, wrap WrapFunc, ndst, nsrc int) ([][]kvPair, int) {
 	df := make([][]kvPair, ndst)
 	count := 0
-	dst2src := float64(ndst) / float64(nsrc)
+
+	// We want to map x=0, and x=maxX to map precicely to nx=0 and nx=nMaxX
+	// This explains the -1. This isn't obvious, as the scaling is now slightly
+	// different from the input - however this avoids artefacts at the X=maxX points
+	// Which are only vicible for certain input images...
+	// For example upscaling
+	// TESTIMAGES/ART/ART_R10_0120x0120/ART_R10_0120x0120_001.png
+	dst2src := float64(ndst-1) / float64(nsrc-1)
+
 	support := f.Support
 	fscale := 1.0
 	if dst2src < 1.0 {
@@ -369,6 +404,7 @@ func makeDiscreteFilter(f Filter, wrap WrapFunc, ndst, nsrc int) ([][]kvPair, in
 		src_x := float64(i) / dst2src
 		min := int(math.Floor(src_x - support - nudge))
 		max := int(math.Ceil(src_x + support + nudge))
+
 		df[i] = make([]kvPair, 0, max-min+1)
 		for j := min; j <= max; j++ {
 			v := f.Apply(fscale*(float64(j)-src_x)) * fscale
@@ -381,6 +417,8 @@ func makeDiscreteFilter(f Filter, wrap WrapFunc, ndst, nsrc int) ([][]kvPair, in
 		}
 		// Rescaling so far hasn't been important for upscaling
 		// but it IS correct anyhow, so we keep the extra work.
+		// It SHOULD only kick in when due to rounding the
+		// pre-calculated filter has varying support.
 		rescale := float32(1.0) / sum_v
 		for j, kv := range df[i] {
 			df[i][j].v = rescale * kv.v
@@ -447,7 +485,7 @@ func putLineNRGBA64(flipXY bool, column []f32RGBA, x int, dst *image.NRGBA64) {
 			A: clampF32ToUint16(f32_to_uint16 * dst_c.A),
 		}
 		if flipXY {
-			dst.SetNRGBA64(y+dy, x+dx, dst_nrgba)
+			dst.SetNRGBA64(y+dx, x+dy, dst_nrgba)
 		} else {
 			dst.SetNRGBA64(x+dx, y+dy, dst_nrgba)
 		}
@@ -478,7 +516,7 @@ func resampleAxisNRGBA64(axis axisSwitch, keepAlive func(int) bool, dst *image.N
 	// and thus we keep the ugly panic to make sure we do
 	// use this function correctly.
 	if dst_max_x-dst_min_x != xsize {
-		log.Fatalf("Unfiltered axis must have preserved size.")
+		panic("Unfiltered axis must have preserved size.")
 	}
 
 	src_column := make([]f32RGBA, ysize)

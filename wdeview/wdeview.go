@@ -33,9 +33,9 @@ func ResizeLoop(win wde.Window, filename string, baseImage image.Image) chan ima
 				log.Printf("%s %v %v", path.Base(filename), baseSize, newSize)
 				resizeChan, _ = resample.ResizeToChannelWithFilter(
 					newSize, baseImage,
-					resample.Lanczos3,
-					resample.Clamp,
-					resample.Clamp)
+					resample.BSpline,
+					resample.Reject,
+					resample.Reject)
 
 			case step := <-resizeChan:
 				if step.Done() {
