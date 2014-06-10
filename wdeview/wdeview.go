@@ -42,7 +42,9 @@ func ResizeLoop(win wde.Window, filename string, baseImage image.Image) chan ima
                     draw.Draw(screen, screen.Bounds(), step.Image, image.ZP, draw.Src)
                     win.FlushImage()
                 } else {
-                    log.Printf("%s %v %v STEP", path.Base(filename), baseSize, newSize)
+                    ratio := float32(step.Done)/float32(step.Total)
+                    log.Printf("%s %v %v STEP (%d%%)", path.Base(filename),
+                               baseSize, newSize, int(100*ratio))
                 }
             }
         }

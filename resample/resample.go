@@ -166,6 +166,7 @@ func Resize(newSize image.Point, src image.Image) (*image.NRGBA64, error) {
 
 type Step struct {
 	Image image.Image
+    Total, Done int
 }
 
 func ResizeToChannel(newSize image.Point, src image.Image) (chan Step, error) {
@@ -190,11 +191,8 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 	resultChannel := make(chan Step)
 	// Code for the KeepAlive function used to
 	// break the calulculation into blocks.
-	// For now the op count is more or less
-	// placeholder code.
-	opCount := 0
-	lastOps := 0
-	opIncrement := 500 * 1000
+    var opCount, totalOps, lastOps, opIncrement int
+	opIncrement = 500 * 1000
 	keepAlive := func (ops int) bool {
 		defer func() { 
 			if r := recover(); r!= nil {
@@ -203,8 +201,9 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 		}()
 		opCount += ops
 		if opCount > lastOps {
-			//log.Printf("Resize %s @ %d kOps", newSize, opCount/1000)
-			resultChannel <- Step{Image:nil}
+            //ratio := float64(opCount/256)/float64(totalOps/256)
+			//log.Printf("Resize %s @ %v kOps (%v%%)", newSize, opCount/1000, int(100*ratio))
+			resultChannel <- Step{Image:nil, Total:totalOps, Done:opCount}
 			lastOps += opIncrement
 		}
 		return true
@@ -212,7 +211,7 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 	}
 	sendImage := func(img image.Image) {
 		defer func() { recover() }()
-		resultChannel <- Step{Image:img}
+		resultChannel <- Step{Image:img, Total:totalOps, Done:opCount}
 	}
 	
     if newSize.X == 0 || newSize.Y == 0 {
@@ -224,22 +223,34 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 	go func() {
 		//log.Printf("Resize %s started!", newSize)
 		xFilter := makeDiscreteFilter(F, XWrap, newSize.X, src.Bounds().Dx())
+        xOps := 0
+        for _, kvs := range xFilter {
+            xOps += len(kvs)
+        }
+        
 		yFilter := makeDiscreteFilter(F, YWrap, newSize.Y, src.Bounds().Dy())
+        yOps := 0
+        for _, kvs := range yFilter {
+            yOps += len(kvs)
+        }
 
 		dst := image.NewNRGBA64(image.Rect(0, 0, newSize.X, newSize.Y))
         
-        xy_ops := src.Bounds().Dx() * dst.Bounds().Dy()
-        yx_ops := src.Bounds().Dy() * dst.Bounds().Dx()
+        xy_ops := yOps * src.Bounds().Dx() + xOps * dst.Bounds().Dy()
+        yx_ops := xOps * src.Bounds().Dy() + yOps * dst.Bounds().Dx()
+        
         if xy_ops < yx_ops {
+            totalOps = xy_ops;
             tmp := image.NewNRGBA64(image.Rect(0, 0, src.Bounds().Dx(), dst.Bounds().Dy()))
             resampleAxisNRGBA64(YAxis, keepAlive, tmp, src, yFilter)
             resampleAxisNRGBA64(XAxis, keepAlive, dst, tmp, xFilter)
         } else {
+            totalOps = yx_ops;
             tmp := image.NewNRGBA64(image.Rect(0, 0, dst.Bounds().Dx(), src.Bounds().Dy()))
             resampleAxisNRGBA64(XAxis, keepAlive, tmp, src, xFilter)
             resampleAxisNRGBA64(YAxis, keepAlive, dst, tmp, yFilter)
         }
-		//log.Printf("Resize %v -> %v %d kOps",src.Bounds().Max, newSize, opCount/1000)
+		//log.Printf("Resize %v -> %v %d kOps (xy =%d,yx =%d)",src.Bounds().Max, newSize,opCount/1000, xy_ops/1000, yx_ops/1000)
 		sendImage(dst)
 	}()
 	return resultChannel, nil
@@ -388,7 +399,7 @@ func resampleAxisNRGBA64(axis axisSwitch, keepAlive func (int) bool, dst *image.
 	dst_column := make([]f32RGBA, dst_max_y-dst_min_y)
 
 	for x := dst_min_x; x != dst_max_x; x++ {
-		opCount := 0
+		var opCount int
 		fetchLine(flip, src_column, x, src)
 		y_i := 0
 		for y := dst_min_y; y != dst_max_y; y++ {
