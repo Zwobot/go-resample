@@ -41,9 +41,7 @@ func drawProgress(win wde.Window, percent int) {
 	white := color.RGBA{255, 255, 255, 255}
 	screen := win.Screen()
 
-	r := screen.Bounds()
-	r = image.Rect(0, 0,
-		r.Dx(), 20)
+	r := image.Rect(0, 0, screen.Bounds().Dx(), 20)
 
 	draw.Draw(screen, r, &image.Uniform{black}, image.ZP, draw.Src)
 	r2 := r
@@ -62,7 +60,9 @@ func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
 	workImage := image.NewNRGBA64(baseImage.Bounds())
     
 	
-	var resizeChan chan resample.Step
+	var resizeChan <-chan resample.Step
+	var doneChan chan<- bool
+	
 	var newSize image.Point
 	newFilter := namedFilter{"Box", resample.Box}
 	for {
@@ -71,13 +71,12 @@ func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
 			win.SetTitle(fmt.Sprintf("%s %s %v %v", newFilter.Name, path.Base(filename), baseSize, newSize))
 			log.Printf("%s %s %v %v", path.Base(filename), newFilter.Name, baseSize, newSize)
             if resizeChan != nil {
-                <-resizeChan
-                close(resizeChan)
+                doneChan <- true
             }
             if workImage.Bounds().Dx() < newSize.X || workImage.Bounds().Dy() < newSize.Y {
                 workImage = image.NewNRGBA64(image.Rectangle{Max:newSize})
             }
-			resizeChan, _ = resample.ResizeToChannelWithFilter(
+			resizeChan, doneChan, _ = resample.ResizeToChannelWithFilter(
                 workImage, image.Rectangle{Max:newSize},
                 baseImage, baseImage.Bounds(),
 				newFilter.F,
@@ -88,13 +87,12 @@ func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
 			win.SetTitle(fmt.Sprintf("%s %s %v %v", newFilter.Name, path.Base(filename), baseSize, newSize))
 			log.Printf("%s %s %v %v", path.Base(filename), newFilter.Name, baseSize, newSize)
             if resizeChan != nil {
-                <-resizeChan
-                close(resizeChan)
+                doneChan <- true
             }
             if workImage.Bounds().Dx() < newSize.X || workImage.Bounds().Dy() < newSize.Y {
                 workImage = image.NewNRGBA64(image.Rectangle{Max:newSize})
             }
-			resizeChan, _ = resample.ResizeToChannelWithFilter(
+			resizeChan, doneChan, _ = resample.ResizeToChannelWithFilter(
                 workImage, image.Rectangle{Max:newSize},
                 baseImage, baseImage.Bounds(),
 				newFilter.F,
@@ -110,8 +108,7 @@ func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
                 workImage = step.Image().(*image.NRGBA64)
 				draw.Draw(screen, screen.Bounds(), workImage, image.ZP, draw.Src)
 				win.FlushImage()
-                close(resizeChan)
-				resizeChan = nil
+				resizeChan, doneChan = nil, nil
 			} else {
 				drawProgress(win, step.Percent())
 				log.Printf("%s %v %v STEP (%d%%)", path.Base(filename),

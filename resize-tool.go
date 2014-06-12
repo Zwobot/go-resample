@@ -48,7 +48,7 @@ func sample(cpuprofile *string, src image.Image, dst image.Point) (image.Image, 
 	}
 	t0 := time.Now()
 	fmt.Printf("resampling ...")
-	out, err := resample.ResizeToChannel(nil, image.Rectangle{Max:dst}, src, src.Bounds())
+	out, _, err := resample.ResizeToChannel(nil, image.Rectangle{Max:dst}, src, src.Bounds())
 
 	if err != nil {
 		fmt.Printf("\rresampling failed: %s\n", err)

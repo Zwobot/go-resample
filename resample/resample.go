@@ -230,15 +230,14 @@ func (s step) Percent() int {
 func Resize(dst image.Image, dstRect image.Rectangle,
 	src image.Image, srcRect image.Rectangle) (image.Image, error) {
 
-	channel, err := ResizeToChannel(dst, dstRect, src, srcRect)
+	steps, _, err := ResizeToChannel(dst, dstRect, src, srcRect)
 	if err != nil {
 		return nil, err
 	}
 
 	for {
-		img := <-channel
+		img := <-steps
 		if img.Done() {
-            close(channel)
 			return img.Image(), nil
 		}
 	}
@@ -251,9 +250,9 @@ func Resize(dst image.Image, dstRect image.Rectangle,
 // You can use this to abort calculating larger image resamples or to show percentage
 // done indicators.
 func ResizeToChannel(dst image.Image, dstRect image.Rectangle,
-	src image.Image, srcRect image.Rectangle) (chan Step, error) {
-	c, err := ResizeToChannelWithFilter(dst, dstRect, src, srcRect, Lanczos3, Reject, Reject)
-	return c, err
+	src image.Image, srcRect image.Rectangle) (<-chan Step, chan<- bool, error) {
+	steps, done, err := ResizeToChannelWithFilter(dst, dstRect, src, srcRect, Lanczos3, Reject, Reject)
+	return steps, done, err
 }
 
 // Returns a blocking channel of Step.
@@ -267,15 +266,15 @@ func ResizeToChannel(dst image.Image, dstRect image.Rectangle,
 // treated. See the provided Clamp function for examples.
 func ResizeToChannelWithFilter(dst image.Image, dstRect image.Rectangle,
 	src image.Image, srcRect image.Rectangle,
-	F Filter, XWrap, YWrap WrapFunc) (chan Step, error) {
+	F Filter, XWrap, YWrap WrapFunc) (<-chan Step, chan<- bool, error) {
 	if src == nil {
-		return nil, ErrSourceImageIsInvalid
+		return nil, nil, ErrSourceImageIsInvalid
 	}
 	if F.Apply == nil || F.Support <= 0 {
-		return nil, ErrMissingFilter
+		return nil, nil, ErrMissingFilter
 	}
 	if XWrap == nil || YWrap == nil {
-		return nil, ErrMissingWrapFunc
+		return nil, nil, ErrMissingWrapFunc
 	}
 
 	var dstBounds image.Rectangle
@@ -288,10 +287,11 @@ func ResizeToChannelWithFilter(dst image.Image, dstRect image.Rectangle,
 	newSize := dstRect.Size()
 
 	if newSize.X < 0 || newSize.Y < 0 {
-		return nil, ErrTargetSizeIsInvalid
+		return nil, nil, ErrTargetSizeIsInvalid
 	}
 
 	resultChannel := make(chan Step)
+	doneChannel := make(chan bool)
 	// Code for the KeepAlive closure used to
 	// break the calulculation into blocks.
 	// Sends on the channel only happen every opIncrement
@@ -301,24 +301,27 @@ func ResizeToChannelWithFilter(dst image.Image, dstRect image.Rectangle,
 	keepAlive := func(ops int) bool {
 		opCount += ops
 		if opCount >= lastOps {
-			defer func() { recover() }()
-			//ratio := float64(opCount/256)/float64(totalOps/256)
-			//log.Printf("Resize %s @ %v kOps (%v%%)", newSize, opCount/1000, int(100*ratio))
-			resultChannel <- step{image: nil, total: totalOps, done: opCount}
-			lastOps += opIncrement
+			select {
+			case <-doneChannel:
+				return false
+			case resultChannel <- step{image: nil, total: totalOps, done: opCount}:
+				lastOps += opIncrement
+				return true
+			}
 		}
 		return true
 
 	}
 	sendImage := func(img image.Image) {
-		defer func() { recover() }()
-		resultChannel <- step{image: img, total: totalOps, done: opCount}
-		//close(resultChannel)
+		select {
+		case resultChannel <- step{image: img, total: totalOps, done: opCount}:
+		case <-doneChannel:
+		}
 	}
 
 	if newSize.X == 0 || newSize.Y == 0 {
 		go sendImage(image.NewNRGBA64(image.Rect(0, 0, newSize.X, newSize.Y)))
-		return resultChannel, nil
+		return resultChannel, doneChannel, nil
 	}
 
 	go func() {
@@ -338,31 +341,31 @@ func ResizeToChannelWithFilter(dst image.Image, dstRect image.Rectangle,
 
 		if xy_ops < yx_ops {
 			totalOps = xy_ops
-            tmpBounds := image.Rect(0, 0, srcRect.Dx(), dstRect.Dy())
-            var tmp *image.NRGBA64
-            if tmpBounds.Dx() < dstRect.Dx() {
-                tmp = image.NewNRGBA64(tmpBounds)
-            } else {
-                tmp = dst
-            }
+			tmpBounds := image.Rect(0, 0, srcRect.Dx(), dstRect.Dy())
+			var tmp *image.NRGBA64
+			if tmpBounds.Dx() < dstRect.Dx() {
+				tmp = image.NewNRGBA64(tmpBounds)
+			} else {
+				tmp = dst
+			}
 			resampleAxisNRGBA64(yAxis, keepAlive, tmp, tmpBounds, src, srcRect, yFilter)
 			resampleAxisNRGBA64(xAxis, keepAlive, dst, dstRect, tmp, tmpBounds, xFilter)
 		} else {
 			totalOps = yx_ops
-            tmpBounds := image.Rect(0, 0, dstRect.Dx(), srcRect.Dy())
-            var tmp *image.NRGBA64
-            if tmpBounds.Dy() < dstRect.Dy() {
-                tmp = image.NewNRGBA64(tmpBounds)
-            } else {
-                tmp = dst
-            }
+			tmpBounds := image.Rect(0, 0, dstRect.Dx(), srcRect.Dy())
+			var tmp *image.NRGBA64
+			if tmpBounds.Dy() < dstRect.Dy() {
+				tmp = image.NewNRGBA64(tmpBounds)
+			} else {
+				tmp = dst
+			}
 			resampleAxisNRGBA64(xAxis, keepAlive, tmp, tmpBounds, src, srcRect, xFilter)
 			resampleAxisNRGBA64(yAxis, keepAlive, dst, dstRect, tmp, tmpBounds, yFilter)
 		}
 		//log.Printf("Resize %v -> %v %d kOps (xy =%d,yx =%d)",src.Bounds().Max, newSize,opCount/1000, xy_ops/1000, yx_ops/1000)
 		sendImage(dst)
 	}()
-	return resultChannel, nil
+	return resultChannel, doneChannel, nil
 }
 
 type f32RGBA struct {
@@ -509,9 +512,9 @@ func putLineNRGBA64(flipXY bool, column []f32RGBA, x int, dst *image.NRGBA64) {
 
 // Resample axis..
 func resampleAxisNRGBA64(axis axisSwitch, keepAlive func(int) bool,
-                         dst *image.NRGBA64, dst_bbox image.Rectangle,
-                         src image.Image, src_bbox image.Rectangle,
-                         f [][]kvPair) {
+	dst *image.NRGBA64, dst_bbox image.Rectangle,
+	src image.Image, src_bbox image.Rectangle,
+	f [][]kvPair) {
 	flip := axis != yAxis
 
 	dst_min_x, dst_max_x := dst_bbox.Min.X, dst_bbox.Max.X
