@@ -58,6 +58,10 @@ func drawProgress(win wde.Window, percent int) {
 func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
 	win wde.Window, filename string, baseImage image.Image) {
 	baseSize := baseImage.Bounds().Max
+
+	workImage := image.NewNRGBA64(baseImage.Bounds())
+    
+	
 	var resizeChan chan resample.Step
 	var newSize image.Point
 	newFilter := namedFilter{"Box", resample.Box}
@@ -67,10 +71,14 @@ func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
 			win.SetTitle(fmt.Sprintf("%s %s %v %v", newFilter.Name, path.Base(filename), baseSize, newSize))
 			log.Printf("%s %s %v %v", path.Base(filename), newFilter.Name, baseSize, newSize)
             if resizeChan != nil {
+                <-resizeChan
                 close(resizeChan)
             }
+            if workImage.Bounds().Dx() < newSize.X || workImage.Bounds().Dy() < newSize.Y {
+                workImage = image.NewNRGBA64(image.Rectangle{Max:newSize})
+            }
 			resizeChan, _ = resample.ResizeToChannelWithFilter(
-                nil, image.Rectangle{Max:newSize},
+                workImage, image.Rectangle{Max:newSize},
                 baseImage, baseImage.Bounds(),
 				newFilter.F,
 				resample.Reject,
@@ -80,10 +88,14 @@ func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
 			win.SetTitle(fmt.Sprintf("%s %s %v %v", newFilter.Name, path.Base(filename), baseSize, newSize))
 			log.Printf("%s %s %v %v", path.Base(filename), newFilter.Name, baseSize, newSize)
             if resizeChan != nil {
+                <-resizeChan
                 close(resizeChan)
             }
+            if workImage.Bounds().Dx() < newSize.X || workImage.Bounds().Dy() < newSize.Y {
+                workImage = image.NewNRGBA64(image.Rectangle{Max:newSize})
+            }
 			resizeChan, _ = resample.ResizeToChannelWithFilter(
-                nil, image.Rectangle{Max:newSize},
+                workImage, image.Rectangle{Max:newSize},
                 baseImage, baseImage.Bounds(),
 				newFilter.F,
 				resample.Reject,
@@ -95,7 +107,8 @@ func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
 				log.Printf("%s %v %v DONE (%d%%)", path.Base(filename),
 					baseSize, newSize, step.Percent())
 				screen := win.Screen()
-				draw.Draw(screen, screen.Bounds(), step.Image(), image.ZP, draw.Src)
+                workImage = step.Image().(*image.NRGBA64)
+				draw.Draw(screen, screen.Bounds(), workImage, image.ZP, draw.Src)
 				win.FlushImage()
                 close(resizeChan)
 				resizeChan = nil

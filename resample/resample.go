@@ -238,6 +238,7 @@ func Resize(dst image.Image, dstRect image.Rectangle,
 	for {
 		img := <-channel
 		if img.Done() {
+            close(channel)
 			return img.Image(), nil
 		}
 	}
@@ -337,14 +338,26 @@ func ResizeToChannelWithFilter(dst image.Image, dstRect image.Rectangle,
 
 		if xy_ops < yx_ops {
 			totalOps = xy_ops
-			tmp := image.NewNRGBA64(image.Rect(0, 0, srcRect.Dx(), dstRect.Dy()))
-			resampleAxisNRGBA64(yAxis, keepAlive, tmp, src, yFilter)
-			resampleAxisNRGBA64(xAxis, keepAlive, dst, tmp, xFilter)
+            tmpBounds := image.Rect(0, 0, srcRect.Dx(), dstRect.Dy())
+            var tmp *image.NRGBA64
+            if tmpBounds.Dx() < dstRect.Dx() {
+                tmp = image.NewNRGBA64(tmpBounds)
+            } else {
+                tmp = dst
+            }
+			resampleAxisNRGBA64(yAxis, keepAlive, tmp, tmpBounds, src, srcRect, yFilter)
+			resampleAxisNRGBA64(xAxis, keepAlive, dst, dstRect, tmp, tmpBounds, xFilter)
 		} else {
 			totalOps = yx_ops
-			tmp := image.NewNRGBA64(image.Rect(0, 0, dstRect.Dx(), srcRect.Dy()))
-			resampleAxisNRGBA64(xAxis, keepAlive, tmp, src, xFilter)
-			resampleAxisNRGBA64(yAxis, keepAlive, dst, tmp, yFilter)
+            tmpBounds := image.Rect(0, 0, dstRect.Dx(), srcRect.Dy())
+            var tmp *image.NRGBA64
+            if tmpBounds.Dy() < dstRect.Dy() {
+                tmp = image.NewNRGBA64(tmpBounds)
+            } else {
+                tmp = dst
+            }
+			resampleAxisNRGBA64(xAxis, keepAlive, tmp, tmpBounds, src, srcRect, xFilter)
+			resampleAxisNRGBA64(yAxis, keepAlive, dst, dstRect, tmp, tmpBounds, yFilter)
 		}
 		//log.Printf("Resize %v -> %v %d kOps (xy =%d,yx =%d)",src.Bounds().Max, newSize,opCount/1000, xy_ops/1000, yx_ops/1000)
 		sendImage(dst)
@@ -495,11 +508,11 @@ func putLineNRGBA64(flipXY bool, column []f32RGBA, x int, dst *image.NRGBA64) {
 }
 
 // Resample axis..
-func resampleAxisNRGBA64(axis axisSwitch, keepAlive func(int) bool, dst *image.NRGBA64, src image.Image, f [][]kvPair) {
+func resampleAxisNRGBA64(axis axisSwitch, keepAlive func(int) bool,
+                         dst *image.NRGBA64, dst_bbox image.Rectangle,
+                         src image.Image, src_bbox image.Rectangle,
+                         f [][]kvPair) {
 	flip := axis != yAxis
-
-	dst_bbox := dst.Bounds()
-	src_bbox := src.Bounds()
 
 	dst_min_x, dst_max_x := dst_bbox.Min.X, dst_bbox.Max.X
 	dst_min_y, dst_max_y := dst_bbox.Min.Y, dst_bbox.Max.Y
