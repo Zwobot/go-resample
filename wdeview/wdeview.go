@@ -16,7 +16,8 @@ import (
 	"log"
 	"os"
 	"path"
-
+    _ "expvar"
+    "net/http"
 // 	"time"
 )
 
@@ -57,7 +58,7 @@ func drawProgress(win wde.Window, percent int) {
 func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
 	win wde.Window, filename string, baseImage image.Image) {
 	baseSize := baseImage.Bounds().Max
-	var resizeChan <-chan resample.Step
+	var resizeChan chan resample.Step
 	var newSize image.Point
 	newFilter := namedFilter{"Box", resample.Box}
 	for {
@@ -65,8 +66,12 @@ func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
 		case newFilter = <-fchan:
 			win.SetTitle(fmt.Sprintf("%s %s %v %v", newFilter.Name, path.Base(filename), baseSize, newSize))
 			log.Printf("%s %s %v %v", path.Base(filename), newFilter.Name, baseSize, newSize)
+            if resizeChan != nil {
+                close(resizeChan)
+            }
 			resizeChan, _ = resample.ResizeToChannelWithFilter(
-				newSize, baseImage,
+                nil, image.Rectangle{Max:newSize},
+                baseImage, baseImage.Bounds(),
 				newFilter.F,
 				resample.Reject,
 				resample.Reject)
@@ -74,8 +79,12 @@ func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
 		case newSize = <-req:
 			win.SetTitle(fmt.Sprintf("%s %s %v %v", newFilter.Name, path.Base(filename), baseSize, newSize))
 			log.Printf("%s %s %v %v", path.Base(filename), newFilter.Name, baseSize, newSize)
+            if resizeChan != nil {
+                close(resizeChan)
+            }
 			resizeChan, _ = resample.ResizeToChannelWithFilter(
-				newSize, baseImage,
+                nil, image.Rectangle{Max:newSize},
+                baseImage, baseImage.Bounds(),
 				newFilter.F,
 				resample.Reject,
 				resample.Reject)
@@ -88,6 +97,7 @@ func ResizeLoop(req <-chan image.Point, fchan <-chan namedFilter,
 				screen := win.Screen()
 				draw.Draw(screen, screen.Bounds(), step.Image(), image.ZP, draw.Src)
 				win.FlushImage()
+                close(resizeChan)
 				resizeChan = nil
 			} else {
 				drawProgress(win, step.Percent())
@@ -157,7 +167,15 @@ func wdeMain() {
 
 }
 
+func serveExpvars(host string) {
+    err := http.ListenAndServe(host, nil)
+    if err != nil {
+        log.Fatal("ListenAndServe: ", err)
+    }
+}
+
 func main() {
+    go serveExpvars(":7777")
 	go wdeMain()
 	wde.Run()
 }

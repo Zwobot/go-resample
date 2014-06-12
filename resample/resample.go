@@ -13,9 +13,9 @@
 // The simplest way to use this package is just to resize an image.
 // You'll just need to supply the source image and a new size.
 //
-// This will use the Lanczos3 scaling filter and handle the image
-// boundaries as if the first/last row/column would stretch beyond the
-// the boundaries of the source image.
+// This will use the Catmull-Rom scaling filter and handle the image
+// boundaries by weighing the pixels close with a higher weight
+// accordingly.
 //
 // Example:
 //     // Double the size
@@ -40,6 +40,7 @@
 package resample
 
 import (
+	"errors"
 	"image"
 	"image/color"
 	"math"
@@ -173,60 +174,14 @@ func Reflect(x, min, max int) int {
 	return x
 }
 
-type Error int
-
-const (
-	ErrMissingFilter Error = iota
-	ErrMissingWrapFunc
-	ErrSourceImageIsInvalid
-	ErrTargetImageIsInvalid
-	ErrTargetSizeIsInvalid
+var (
+	ErrMissingFilter        = errors.New("Filter is invalid.")
+	ErrMissingWrapFunc      = errors.New("Wrap function is invalid.")
+	ErrSourceImageIsInvalid = errors.New("Source image is invalid.")
+	ErrTargetImageIsInvalid = errors.New("Target image is invalid.")
+	ErrTargetSizeIsInvalid  = errors.New("Target size is invalid.")
+	ErrLogicError           = errors.New("Programming error.")
 )
-
-func (e Error) Error() string {
-	switch e {
-	case ErrMissingFilter:
-		return "Filter is invalid."
-	case ErrMissingWrapFunc:
-		return "Wrap function is invalid."
-	case ErrSourceImageIsInvalid:
-		return "Source image is invalid."
-	case ErrTargetImageIsInvalid:
-		return "Target image is invalid."
-	case ErrTargetSizeIsInvalid:
-		return "Target size is invalid."
-	}
-	return "Programming error."
-}
-
-// Create a new image.NRGBA64 with the size newSize and resampled
-// from src via the Lanczos3 filter. Boundaries are rejected.
-// Returns an error if the src is nil, or if the newSize is
-// negative in either dimension.
-func Resize(newSize image.Point, src image.Image) (*image.NRGBA64, error) {
-	if src == nil {
-		return nil, ErrSourceImageIsInvalid
-	}
-	if newSize.X < 0 || newSize.Y < 0 {
-		return nil, ErrTargetSizeIsInvalid
-	}
-	if newSize.X == 0 || newSize.Y == 0 {
-		return image.NewNRGBA64(image.Rect(0, 0, newSize.X, newSize.Y)), nil
-	}
-
-	channel, err := ResizeToChannel(newSize, src)
-	if err != nil {
-		return nil, err
-	}
-
-	for {
-		img := <-channel
-		if img.Done() {
-			return img.Image().(*image.NRGBA64), nil
-		}
-	}
-	panic("Unreachable code reached. This is a BUG in go-resample.")
-}
 
 // A step of the resampling process. 
 type Step interface {
@@ -259,26 +214,48 @@ func (s step) Image() image.Image {
 }
 
 func (s step) Percent() int {
-    if s.Done() {
-        return 100
-    }
-    if s.total == 0 {
-        return 0
-    }
+	if s.Done() {
+		return 100
+	}
+	if s.total == 0 {
+		return 0
+	}
 	return int(100 * float32(s.done) / float32(s.total))
 }
 
-// Returns a blocking receive only channel of Step.
+// Create a new image.NRGBA64 with the size newSize and resampled
+// from src via the Catmull-Rom cubic filter. Boundaries are rejected.
+// Returns an error if the src is nil, or if the newSize is
+// negative in either dimension.
+func Resize(dst image.Image, dstRect image.Rectangle,
+	src image.Image, srcRect image.Rectangle) (image.Image, error) {
+
+	channel, err := ResizeToChannel(dst, dstRect, src, srcRect)
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		img := <-channel
+		if img.Done() {
+			return img.Image(), nil
+		}
+	}
+	panic("Unreachable code reached. This is a BUG in go-resample.")
+}
+
+// Returns a blocking channel of Step.
 //
 // Once Step.Done() is true, the calculation has finished and the channel is closed.
 // You can use this to abort calculating larger image resamples or to show percentage
 // done indicators.
-func ResizeToChannel(newSize image.Point, src image.Image) (<-chan Step, error) {
-	c, err := ResizeToChannelWithFilter(newSize, src, Lanczos3, Reject, Reject)
+func ResizeToChannel(dst image.Image, dstRect image.Rectangle,
+	src image.Image, srcRect image.Rectangle) (chan Step, error) {
+	c, err := ResizeToChannelWithFilter(dst, dstRect, src, srcRect, Lanczos3, Reject, Reject)
 	return c, err
 }
 
-// Returns a blocking receive only channel of Step.
+// Returns a blocking channel of Step.
 //
 // Once Step.Done() is true, the calculation has finished and the channel is closed.
 // You can use this to abort calculating larger image resamples or to show percentage
@@ -287,18 +264,30 @@ func ResizeToChannel(newSize image.Point, src image.Image) (<-chan Step, error) 
 // The filter F is the resampling function used. See the provided samplers for examples.
 // Additionally X- and YWrap functions are used to define how image boundaries are
 // treated. See the provided Clamp function for examples.
-func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, XWrap, YWrap WrapFunc) (<-chan Step, error) {
+func ResizeToChannelWithFilter(dst image.Image, dstRect image.Rectangle,
+	src image.Image, srcRect image.Rectangle,
+	F Filter, XWrap, YWrap WrapFunc) (chan Step, error) {
 	if src == nil {
 		return nil, ErrSourceImageIsInvalid
-	}
-	if newSize.X < 0 || newSize.Y < 0 {
-		return nil, ErrTargetSizeIsInvalid
 	}
 	if F.Apply == nil || F.Support <= 0 {
 		return nil, ErrMissingFilter
 	}
 	if XWrap == nil || YWrap == nil {
 		return nil, ErrMissingWrapFunc
+	}
+
+	var dstBounds image.Rectangle
+	if dst == nil {
+		dstBounds.Max = srcRect.Size()
+	} else {
+		dstBounds = dst.Bounds()
+	}
+
+	newSize := dstRect.Size()
+
+	if newSize.X < 0 || newSize.Y < 0 {
+		return nil, ErrTargetSizeIsInvalid
 	}
 
 	resultChannel := make(chan Step)
@@ -311,6 +300,7 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 	keepAlive := func(ops int) bool {
 		opCount += ops
 		if opCount >= lastOps {
+			defer func() { recover() }()
 			//ratio := float64(opCount/256)/float64(totalOps/256)
 			//log.Printf("Resize %s @ %v kOps (%v%%)", newSize, opCount/1000, int(100*ratio))
 			resultChannel <- step{image: nil, total: totalOps, done: opCount}
@@ -320,8 +310,9 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 
 	}
 	sendImage := func(img image.Image) {
+		defer func() { recover() }()
 		resultChannel <- step{image: img, total: totalOps, done: opCount}
-		close(resultChannel)
+		//close(resultChannel)
 	}
 
 	if newSize.X == 0 || newSize.Y == 0 {
@@ -330,25 +321,28 @@ func ResizeToChannelWithFilter(newSize image.Point, src image.Image, F Filter, X
 	}
 
 	go func() {
-        // Send first empty step before we do any real work.
-        keepAlive(0)
-        
-		xFilter, xOps := makeDiscreteFilter(F, XWrap, newSize.X, src.Bounds().Dx())
-		yFilter, yOps := makeDiscreteFilter(F, YWrap, newSize.Y, src.Bounds().Dy())
+		// Send first empty step before we do any real work.
+		keepAlive(0)
 
-		dst := image.NewNRGBA64(image.Rect(0, 0, newSize.X, newSize.Y))
+		xFilter, xOps := makeDiscreteFilter(F, XWrap, dstRect.Dx(), srcRect.Dx())
+		yFilter, yOps := makeDiscreteFilter(F, YWrap, dstRect.Dy(), srcRect.Dy())
 
-		xy_ops := yOps*src.Bounds().Dx() + xOps*dst.Bounds().Dy()
-		yx_ops := xOps*src.Bounds().Dy() + yOps*dst.Bounds().Dx()
+		if dst == nil {
+			dst = image.NewNRGBA64(dstRect)
+		}
+		dst := dst.(*image.NRGBA64)
+
+		xy_ops := yOps*srcRect.Dx() + xOps*dstRect.Dy()
+		yx_ops := xOps*srcRect.Dy() + yOps*dstRect.Dx()
 
 		if xy_ops < yx_ops {
 			totalOps = xy_ops
-			tmp := image.NewNRGBA64(image.Rect(0, 0, src.Bounds().Dx(), dst.Bounds().Dy()))
+			tmp := image.NewNRGBA64(image.Rect(0, 0, srcRect.Dx(), dstRect.Dy()))
 			resampleAxisNRGBA64(yAxis, keepAlive, tmp, src, yFilter)
 			resampleAxisNRGBA64(xAxis, keepAlive, dst, tmp, xFilter)
 		} else {
 			totalOps = yx_ops
-			tmp := image.NewNRGBA64(image.Rect(0, 0, dst.Bounds().Dx(), src.Bounds().Dy()))
+			tmp := image.NewNRGBA64(image.Rect(0, 0, dstRect.Dx(), srcRect.Dy()))
 			resampleAxisNRGBA64(xAxis, keepAlive, tmp, src, xFilter)
 			resampleAxisNRGBA64(yAxis, keepAlive, dst, tmp, yFilter)
 		}
